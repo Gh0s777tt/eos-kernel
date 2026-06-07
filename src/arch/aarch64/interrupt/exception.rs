@@ -185,6 +185,67 @@ unsafe fn pf_inner(stack: &mut InterruptStack, ty: u8, from: &str) -> bool {
     }
 }
 
+/// E-OS R-401b: software emulation of the FEAT_RNG (ARMv8.5) RNDR / RNDRRS system registers for
+/// CPUs that do not implement them (e.g. ARMv8.0 cortex-a72, Raspberry Pi 3/4). Redox `randd`
+/// reads RNDRRS unconditionally to seed the system CSPRNG; on a non-FEAT_RNG core this is an
+/// UNDEFINED instruction -> synchronous exception with EC=0b000000 ("Unknown reason") at EL0,
+/// which kills randd, takes down the `rand:` scheme, and cascades into a failed boot (every later
+/// daemon panics with "failed to generate random data: ENODEV").
+///
+/// Returns true iff the faulting instruction was `MRS <Xt>, RNDR/RNDRRS` and was emulated.
+///
+/// NOTE: the value handed back is a splitmix64 PRNG seeded from CNTPCT_EL0 -- this is NOT a strong
+/// entropy source, it only unblocks boot on non-FEAT_RNG hardware. A proper fix needs a real
+/// entropy source (interrupt-timing jitter / a hardware RNG).
+unsafe fn emulate_feat_rng(stack: &mut InterruptStack) -> bool {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static RNG_STATE: AtomicU64 = AtomicU64::new(0);
+
+    unsafe {
+        // Read the faulting instruction from EL0 via an unprivileged load (respects PAN).
+        let elr = stack.iret.elr_el1;
+        let instr: u32;
+        core::arch::asm!(
+            "ldtr {0:w}, [{1}]",
+            out(reg) instr,
+            in(reg) elr,
+            options(nostack, readonly, preserves_flags),
+        );
+
+        // MRS <Xt>, RNDR   = 0xD53B_2400 | Rt
+        // MRS <Xt>, RNDRRS = 0xD53B_2420 | Rt
+        let masked = instr & 0xFFFF_FFE0;
+        if masked != 0xD53B_2400 && masked != 0xD53B_2420 {
+            return false;
+        }
+        let rt = (instr & 0x1F) as usize;
+
+        // splitmix64, lazily seeded once from the physical counter.
+        let mut s = RNG_STATE.load(Ordering::Relaxed);
+        if s == 0 {
+            s = (cntpct_el0() as u64) ^ 0x9E37_79B9_7F4A_7C15;
+        }
+        s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        RNG_STATE.store(s, Ordering::Relaxed);
+        let mut z = s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // randd treats a 0 result as "RNG not ready"; never hand back exactly 0.
+        if z == 0 {
+            z = 0x9E37_79B9_7F4A_7C15;
+        }
+
+        // store_reg() treats rt==31 (XZR) as a no-op, matching the CNTxxx emulation above.
+        stack.store_reg(rt, z as usize);
+        // FEAT_RNG sets PSTATE.NZCV = 0b0000 on success; NZCV = SPSR_EL1[31:28].
+        stack.iret.spsr_el1 &= !(0xF << 28);
+        // Skip the emulated instruction (A64 instructions are always 4 bytes).
+        stack.iret.elr_el1 += 4;
+        true
+    }
+}
+
 exception_stack!(synchronous_exception_at_el0, |stack| {
     unsafe {
         match exception_code(stack.iret.esr_el1) {
@@ -199,7 +260,11 @@ exception_stack!(synchronous_exception_at_el0, |stack| {
             }
 
             ty => {
-                if !pf_inner(stack, ty as u8, "sync_exc_el0") {
+                if !pf_inner(stack, ty as u8, "sync_exc_el0")
+                    // E-OS R-401b: emulate FEAT_RNG (RNDR/RNDRRS) on cores that lack it, instead of
+                    // killing the process. EC=0b000000 is "Unknown reason" (undefined instruction).
+                    && !(ty == 0b000000 && emulate_feat_rng(stack))
+                {
                     error!(
                         "FATAL: Not an SVC induced synchronous exception (ty={:b})",
                         ty
