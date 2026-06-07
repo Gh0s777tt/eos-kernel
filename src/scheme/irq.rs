@@ -190,8 +190,12 @@ impl IrqScheme {
                     .or(Err(Error::new(ENOENT)))?;
                 debug!("open_phandle_irq  virq={}", irq_number);
                 if flags & O_STAT == 0 {
+                    // E-OS R-401d: PCIe INTx# pins map to GIC SPIs that are *shared* across devices
+                    // (and may already be reserved at init). irq_trigger() already fans an IRQ out
+                    // to every handle registered for it, so permit shared opens here instead of
+                    // failing with EEXIST — the exclusive check broke nvmed's INTx on aarch64.
                     if is_reserved(LogicalCpuId::new(0), irq_number as u8) {
-                        return Err(Error::new(EEXIST));
+                        debug!("open_phandle_irq  virq={} already reserved; sharing (INTx)", irq_number);
                     }
                     set_reserved(LogicalCpuId::new(0), irq_number as u8, true);
                 }
