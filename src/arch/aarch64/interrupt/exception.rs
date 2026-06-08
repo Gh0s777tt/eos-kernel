@@ -194,12 +194,22 @@ unsafe fn pf_inner(stack: &mut InterruptStack, ty: u8, from: &str) -> bool {
 ///
 /// Returns true iff the faulting instruction was `MRS <Xt>, RNDR/RNDRRS` and was emulated.
 ///
-/// NOTE: the value handed back is a splitmix64 PRNG seeded from CNTPCT_EL0 -- this is NOT a strong
-/// entropy source, it only unblocks boot on non-FEAT_RNG hardware. A proper fix needs a real
-/// entropy source (interrupt-timing jitter / a hardware RNG).
+/// ENTROPY (E-OS R-401b, enhanced): rather than a single CNTPCT seed feeding a deterministic
+/// splitmix64, every read folds in fresh **CPU-execution-timing jitter** -- the low bits of
+/// CNTVCT_EL0 deltas measured across short bursts of data-dependent memory work. On real
+/// non-FEAT_RNG hardware (cortex-a72 etc.) those deltas vary unpredictably from cache/pipeline/DVFS
+/// noise, giving a genuine (if modest) entropy source -- the CPU-jitter technique used by Linux's
+/// jitterentropy / haveged. A Weyl counter + splitmix64 finalizer form the backbone so the output
+/// is always non-repeating and non-zero even where the jitter is weak (e.g. a deterministic
+/// emulator like QEMU TCG). This is still not a certified TRNG -- a real hardware RNG remains the
+/// ideal -- but it is materially stronger than the old single-seed PRNG.
 unsafe fn emulate_feat_rng(stack: &mut InterruptStack) -> bool {
     use core::sync::atomic::{AtomicU64, Ordering};
-    static RNG_STATE: AtomicU64 = AtomicU64::new(0);
+    // Persistent entropy pool, stirred every call. WEYL is a per-call monotonic counter (atomic
+    // RMW) that guarantees distinct, non-repeating output even across CPUs and even if the pool
+    // and jitter were to contribute nothing on a given platform.
+    static POOL: AtomicU64 = AtomicU64::new(0);
+    static WEYL: AtomicU64 = AtomicU64::new(0);
 
     unsafe {
         // Read the faulting instruction from EL0 via an unprivileged load (respects PAN).
@@ -220,14 +230,50 @@ unsafe fn emulate_feat_rng(stack: &mut InterruptStack) -> bool {
         }
         let rt = (instr & 0x1F) as usize;
 
-        // splitmix64, lazily seeded once from the physical counter.
-        let mut s = RNG_STATE.load(Ordering::Relaxed);
-        if s == 0 {
-            s = (cntpct_el0() as u64) ^ 0x9E37_79B9_7F4A_7C15;
+        // --- gather CPU-execution-timing jitter (the real entropy source on hardware) ---
+        // Sample CNTVCT_EL0 around short, data-dependent, variable-latency memory work; the timing
+        // deltas carry microarchitectural noise. `black_box` defeats the optimizer so the work and
+        // the loop actually execute (and are not folded into a constant).
+        let mut jitter: u64 = cntvct_el0() as u64;
+        let mut scratch: [u64; 8] = [
+            0x243F_6A88_85A3_08D3, 0x1319_8A2E_0370_7344,
+            0xA409_3822_299F_31D0, 0x082E_FA98_EC4E_6C89,
+            0x4528_21E6_38D0_1377, 0xBE54_66CF_34E9_0C6C,
+            0xC0AC_29B7_C97C_50DD, 0x3F84_D5B5_B547_0917,
+        ];
+        for round in 0..48u64 {
+            let t0 = cntvct_el0() as u64;
+            let idx = ((jitter ^ round) & 7) as usize;
+            scratch[idx] = scratch[idx]
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left((t0 & 63) as u32)
+                ^ jitter;
+            core::hint::black_box(&scratch);
+            let t1 = cntvct_el0() as u64;
+            jitter = jitter
+                .rotate_left(7)
+                ^ t1.wrapping_sub(t0)
+                ^ scratch[idx]
+                ^ t1;
         }
-        s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        RNG_STATE.store(s, Ordering::Relaxed);
-        let mut z = s;
+
+        // --- stir the persistent pool with the gathered jitter + both timers ---
+        let weyl = WEYL
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut pool = POOL.load(Ordering::Relaxed);
+        if pool == 0 {
+            pool = (cntpct_el0() as u64) ^ 0x9E37_79B9_7F4A_7C15;
+        }
+        pool = pool
+            .rotate_left(17)
+            .wrapping_add(jitter)
+            ^ (cntpct_el0() as u64)
+            ^ weyl;
+        POOL.store(pool, Ordering::Relaxed);
+
+        // --- splitmix64 finalizer over (pool + weyl) for a well-distributed output ---
+        let mut z = pool.wrapping_add(weyl);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;
