@@ -27,10 +27,18 @@ pub unsafe fn init(fdt: &Fdt) {
         let mut timer = GenericTimer::new();
         timer.init();
         if let Some(node) = fdt.find_compatible(&["arm,armv7-timer"]) {
-            let irq = get_interrupt(fdt, &node, 1).unwrap();
-            debug!("irq = {:?}", irq);
+            // arm,arm{v7,v8}-timer lists its PPIs in this order: 0 = secure
+            // physical, 1 = non-secure physical, 2 = virtual, 3 = hypervisor.
+            // We arm the *virtual* timer when VHE is absent (use_virtual_timer),
+            // so we must register the virtual timer's PPI (index 2). Registering
+            // the physical PPI (index 1) while running the virtual timer means the
+            // timer fires but its interrupt is never handled -- so timed wakeups
+            // (thread::sleep, via timeout::trigger) never run and the boot hangs
+            // at the first sleeping driver. (E-OS: fixes aarch64 boot stall.)
+            let timer_irq_idx = if timer.use_virtual_timer { 2 } else { 1 };
+            let irq = get_interrupt(fdt, &node, timer_irq_idx).unwrap();
+            debug!("irq = {:?} (virtual_timer={})", irq, timer.use_virtual_timer);
             if let Some(ic_idx) = ic_for_chip(&fdt, &node) {
-                //PHYS_NONSECURE_PPI only
                 let virq = IRQ_CHIP.irq_chip_list.chips[ic_idx]
                     .ic
                     .irq_xlate(irq)
