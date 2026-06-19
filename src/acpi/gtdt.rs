@@ -46,10 +46,24 @@ impl Gtdt {
             return;
         };
 
-        let gsiv = gtdt.non_secure_el1_timer_gsiv;
-        info!("generic_timer gsiv = {}", gsiv);
         let mut timer = GenericTimer::new();
         timer.init();
+        // The kernel arms the *virtual* timer when VHE is absent (use_virtual_timer,
+        // true on e.g. cortex-a72 / the QEMU virt machine), so register the GSIV of
+        // the timer actually in use. Registering the non-secure physical timer's
+        // GSIV while running the virtual timer means the timer fires but its
+        // interrupt is never handled -- so context::timeout::trigger never runs and
+        // every thread::sleep blocks forever, hanging the boot at the first sleeping
+        // driver. (E-OS: fixes the aarch64 boot stall.)
+        let gsiv = if timer.use_virtual_timer {
+            gtdt.virtual_el1_timer_gsiv
+        } else {
+            gtdt.non_secure_el1_timer_gsiv
+        };
+        info!(
+            "generic_timer gsiv = {} (virtual_timer={})",
+            gsiv, timer.use_virtual_timer
+        );
         register_irq(gsiv, Box::new(timer));
         unsafe { IRQ_CHIP.irq_enable(gsiv as u32) };
     }
