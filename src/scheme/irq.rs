@@ -454,6 +454,13 @@ impl crate::scheme::KernelScheme for IrqScheme {
                 }
                 handle_ack.store(ack, Ordering::SeqCst);
                 unsafe {
+                    // E-OS: aarch64 masks + EOIs userspace level INTx in-kernel (see
+                    // dtb::irqchip::trigger_virq), so the driver's ack must RE-ENABLE
+                    // (unmask) the line rather than EOI again (a double-EOI would
+                    // corrupt GICv2 state). Other arches keep the deferred-EOI ack.
+                    #[cfg(target_arch = "aarch64")]
+                    IRQ_CHIP.irq_enable(handle_irq as u32);
+                    #[cfg(not(target_arch = "aarch64"))]
                     acknowledge(handle_irq as usize);
                 }
                 Ok(size_of::<usize>())

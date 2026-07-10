@@ -317,6 +317,19 @@ impl IrqChipCore {
                     if let Some(ic_idx) = desc.basic.child_ic_idx {
                         self.irq_chip_list.chips[ic_idx].ic.irq_handler(virq, token);
                     } else {
+                        // E-OS: userspace-handled level-triggered INTx. Mask this
+                        // line and EOI (priority-drop + deactivate) in-kernel BEFORE
+                        // notifying userspace, so the GIC running priority drops at
+                        // once. Otherwise the interrupt stays active and blocks the
+                        // timer PPI until the driver acks -- but the driver cannot be
+                        // scheduled to ack without the timer, a deadlock (seen on the
+                        // July stack). The line stays masked until the driver's ack
+                        // re-enables it. aarch64-only; riscv64 PLIC EOIs in-handler.
+                        #[cfg(target_arch = "aarch64")]
+                        {
+                            self.irq_disable(virq);
+                            self.irq_eoi(virq);
+                        }
                         irq_trigger(virq as u8, token);
                     }
                 }
