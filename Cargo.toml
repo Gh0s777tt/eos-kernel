@@ -117,5 +117,9 @@ panic = "abort"
 [profile.release]
 # Avoids having to define the eh_personality lang item and reduces kernel size
 panic = "abort"
+# E-OS hardening: turn silent integer overflow (a common exploit primitive) into
+# a controlled abort in the release kernel. Kernel arithmetic that intends to wrap
+# uses wrapping_*/Wrapping explicitly, so this only fires on unintended overflow.
+overflow-checks = true
 #lto = true
 debug = "full"
