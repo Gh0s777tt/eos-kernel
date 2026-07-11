@@ -1005,7 +1005,7 @@ impl UserGrants {
         // PROT_NONE?
 
         let req_size = page_count * PAGE_SIZE;
-        let (_, hole_start) = self
+        let (hole_size, hole_start) = self
             .holes_by_size
             .range((req_size, VirtualAddress::new(0))..)
             .find(|&&(hole_size, hole_offset)| {
@@ -1015,9 +1015,21 @@ impl UserGrants {
                 let hole_end = hole_offset.data() + hole_size;
                 usable_start + req_size <= hole_end
             })?;
+        // E-OS ASLR: place the region at a page-aligned RANDOM offset inside the
+        // chosen hole instead of always at its start, so "map anywhere" allocations
+        // (heap, mmap'd libraries, stacks) are not at predictable addresses. Only the
+        // non-fixed mmap path reaches find_free; MAP_FIXED is unaffected. Bounded so a
+        // small allocation can't be flung to the far end of a huge hole.
+        let usable_start = cmp::max(hole_start.data(), min);
+        let hole_end = hole_start.data().wrapping_add(*hole_size);
+        let slack_pages = hole_end
+            .saturating_sub(usable_start)
+            .saturating_sub(req_size)
+            / PAGE_SIZE;
+        let base = usable_start.wrapping_add(aslr_offset_pages(slack_pages).wrapping_mul(PAGE_SIZE));
         // Create new region
         Some(PageSpan::new(
-            Page::containing_address(VirtualAddress::new(cmp::max(hole_start.data(), min))),
+            Page::containing_address(VirtualAddress::new(base)),
             page_count,
         ))
     }
@@ -3065,4 +3077,62 @@ impl TlbShootdownActions {
         this.set(Self::REVOKE_EXEC, old.has_execute() && !new.has_execute());
         this
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// E-OS: user-space mmap ASLR. Upstream Redox has no ASLR/KASLR, so "map
+// anywhere" allocations land at deterministic addresses. `find_free_near` now
+// offsets the base by `aslr_offset_pages` within the chosen hole. A splitmix64
+// PRNG seeded from a cycle counter and re-mixed with fresh jitter per call
+// supplies the offset -- not crypto-grade, but ASLR only needs per-boot
+// unpredictability. Set KERNEL_ASLR = false to disable.
+// ---------------------------------------------------------------------------
+const KERNEL_ASLR: bool = true;
+// Cap the randomization window (avoids pathological fragmentation): up to 2^16 pages.
+const ASLR_MAX_SLACK_PAGES: usize = 1 << 16;
+
+static ASLR_STATE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+fn aslr_cycle_counter() -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let v: u64;
+        core::arch::asm!("mrs {}, cntvct_el0", out(reg) v);
+        v
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_rdtsc()
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        ASLR_STATE
+            .load(Ordering::Relaxed)
+            .wrapping_add(0x9E3779B97F4A7C15)
+    }
+}
+
+/// A page-count offset uniformly in `[0, max_pages]` (capped by ASLR_MAX_SLACK_PAGES),
+/// used to randomize an mmap base within a free hole. 0 when ASLR is off / no slack.
+fn aslr_offset_pages(max_pages: usize) -> usize {
+    if !KERNEL_ASLR {
+        return 0;
+    }
+    let bound = core::cmp::min(max_pages, ASLR_MAX_SLACK_PAGES);
+    if bound == 0 {
+        return 0;
+    }
+    let mut s = ASLR_STATE.load(Ordering::Relaxed);
+    if s == 0 {
+        s = aslr_cycle_counter() ^ 0x9E3779B97F4A7C15;
+    }
+    s = s.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = s;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^= z >> 31;
+    ASLR_STATE.store(s, Ordering::Relaxed);
+    ((z ^ aslr_cycle_counter()) % (bound as u64 + 1)) as usize
 }
