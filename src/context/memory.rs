@@ -1048,7 +1048,15 @@ impl UserGrants {
             .saturating_sub(usable_start)
             .saturating_sub(req_size)
             / PAGE_SIZE;
-        let base = usable_start.wrapping_add(aslr_offset_pages(slack_pages).wrapping_mul(PAGE_SIZE));
+        // E-OS guard band: keep >= `guard` unmapped pages on *both* sides of the mapping
+        // within the hole (a soft guard against linear overflow). `guard` shrinks to at
+        // most half the slack so a tight hole still places successfully; the remaining
+        // span is what ASLR randomizes over.
+        let guard = cmp::min(ASLR_GUARD_PAGES, slack_pages / 2);
+        let random_span = slack_pages.saturating_sub(guard.wrapping_mul(2));
+        let base = usable_start
+            .wrapping_add(guard.wrapping_mul(PAGE_SIZE))
+            .wrapping_add(aslr_offset_pages(random_span).wrapping_mul(PAGE_SIZE));
         // Create new region
         Some(PageSpan::new(
             Page::containing_address(VirtualAddress::new(base)),
@@ -3113,6 +3121,11 @@ impl TlbShootdownActions {
 const KERNEL_ASLR: bool = true;
 // Cap the randomization window (avoids pathological fragmentation): up to 2^16 pages.
 const ASLR_MAX_SLACK_PAGES: usize = 1 << 16;
+// E-OS guard band: minimum unmapped margin (in pages) kept before and after each
+// map-anywhere allocation when its hole has room, so a linear overflow past a mapping
+// runs into unmapped space and faults instead of silently corrupting the neighbour.
+// Best-effort — shrinks to fit tight holes, never causes ENOMEM.
+const ASLR_GUARD_PAGES: usize = 4;
 
 static ASLR_STATE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
