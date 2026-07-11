@@ -40,7 +40,11 @@ macro_rules! info {
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
-        if cfg!(any(target_arch = "aarch64", target_arch = "riscv64")) {
+        // E-OS: gate the aarch64/riscv64 debug output behind KERNEL_DEBUG (default
+        // false). Upstream printed it unconditionally on those arches -- a bring-up
+        // aid that floods the console (one DEBUG per call_fdread etc.) and starves
+        // interactive serial input under QEMU TCG. Set KERNEL_DEBUG=true to re-enable.
+        if cfg!(any(target_arch = "aarch64", target_arch = "riscv64")) && $crate::KERNEL_DEBUG {
             println!("{}:DEBUG -- {}", core::module_path!(), format_args!($($arg)*));
         }
     };

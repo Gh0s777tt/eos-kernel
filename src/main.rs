@@ -35,6 +35,11 @@ use crate::arch::{consts::*, ipi, stop, CurrentRmmArch};
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), expect(dead_code))]
 const PHYS_OFFSET: usize = <arch::CurrentRmmArch as ::rmm::Arch>::PHYS_OFFSET;
 
+/// E-OS: master switch for the aarch64/riscv64 `debug!` output (src/macros.rs).
+/// Off by default -- upstream printed it unconditionally on those arches, which
+/// floods the console and starves interactive serial input under QEMU TCG.
+pub const KERNEL_DEBUG: bool = false;
+
 /// Heap allocators
 mod allocator;
 
