@@ -94,7 +94,9 @@ pub fn syscall(
             SYS_WRITE => sys_write(fd, UserSlice::ro(c, d)?, token),
             SYS_FMAP => {
                 let addrspace = AddrSpace::current()?;
-                let map = unsafe { UserSlice::ro(c, d)?.read_exact::<Map>()? };
+                let mut map = unsafe { UserSlice::ro(c, d)?.read_exact::<Map>()? };
+                // E-OS W^X: a userspace mmap may not request writable+executable.
+                map.flags = crate::context::memory::wx_sanitize(map.flags);
                 if b == !0 {
                     MemoryScheme::fmap_anonymous(&addrspace, &map, false, token)
                 } else {
@@ -219,7 +221,14 @@ pub fn syscall(
             }
             SYS_FUTEX => futex(b, c, d, e, f, token),
 
-            SYS_MPROTECT => mprotect(b, c, MapFlags::from_bits_truncate(d), token).map(|()| 0),
+            SYS_MPROTECT => mprotect(
+                b,
+                c,
+                // E-OS W^X: a userspace mprotect may not create a writable+executable page.
+                crate::context::memory::wx_sanitize(MapFlags::from_bits_truncate(d)),
+                token,
+            )
+            .map(|()| 0),
             SYS_MREMAP => mremap(b, c, d, e, f, token),
             _ => Err(Error::new(ENOSYS)),
         }

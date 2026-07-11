@@ -658,7 +658,8 @@ pub fn mremap(
     let new_base = Page::containing_address(VirtualAddress::new(new_address));
 
     let mremap_flags = MremapFlags::from_bits_truncate(flags);
-    let prot_flags = MapFlags::from_bits_truncate(flags)
+    // E-OS W^X: a userspace mremap may not request writable+executable.
+    let prot_flags = crate::context::memory::wx_sanitize(MapFlags::from_bits_truncate(flags))
         & (MapFlags::PROT_READ | MapFlags::PROT_WRITE | MapFlags::PROT_EXEC);
 
     let map_flags = if mremap_flags.contains(MremapFlags::FIXED_REPLACE) {

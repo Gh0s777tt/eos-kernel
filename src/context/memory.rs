@@ -36,32 +36,33 @@ use super::context::HardBlockedReason;
 
 pub const MMAP_MIN_DEFAULT: usize = PAGE_SIZE;
 
-// E-OS W^X: a user page must never be simultaneously writable and executable.
-// Upstream Redox lets mmap/mprotect request PROT_WRITE|PROT_EXEC (an RWX page),
-// which lets any write primitive drop and immediately run shellcode. We enforce
-// "writable => not executable": data pages stay usable, code must be mapped
-// read-only-executable (the loader already maps text R-X and data RW separately,
-// and does its relocation writes before flipping to R-X, so normal programs are
-// unaffected). Gated by KERNEL_WX_USER so it can be disabled if some component
-// genuinely needs RWX.
+// E-OS W^X: userspace must never obtain a page that is simultaneously writable
+// and executable, or a write primitive can drop and immediately run shellcode.
+// Upstream Redox allows an mmap/mprotect/mremap with PROT_WRITE|PROT_EXEC. We
+// strip PROT_EXEC from any *userspace* request that also asks for PROT_WRITE, at
+// the syscall boundary (SYS_FMAP / SYS_MPROTECT / SYS_MREMAP). This is deliberately
+// NOT applied to the shared page_flags() conversion: the trusted one-shot bootstrap
+// blob (usermode_bootstrap) is legitimately mapped RWX via the same internal
+// AddrSpace::mmap path and must stay executable. Gated by KERNEL_WX_USER.
 pub const KERNEL_WX_USER: bool = true;
 
 #[inline]
-pub fn enforce_wx(pf: PageFlags<RmmA>) -> PageFlags<RmmA> {
-    if KERNEL_WX_USER && pf.has_write() && pf.has_execute() {
-        pf.execute(false)
+pub fn wx_sanitize(flags: MapFlags) -> MapFlags {
+    if KERNEL_WX_USER
+        && flags.contains(MapFlags::PROT_WRITE)
+        && flags.contains(MapFlags::PROT_EXEC)
+    {
+        flags & !MapFlags::PROT_EXEC
     } else {
-        pf
+        flags
     }
 }
 
 pub fn page_flags(flags: MapFlags) -> PageFlags<RmmA> {
-    enforce_wx(
-        PageFlags::new()
-            .user(true)
-            .execute(flags.contains(MapFlags::PROT_EXEC))
-            .write(flags.contains(MapFlags::PROT_WRITE)),
-    )
+    PageFlags::new()
+        .user(true)
+        .execute(flags.contains(MapFlags::PROT_EXEC))
+        .write(flags.contains(MapFlags::PROT_WRITE))
     //TODO: PROT_READ
 }
 pub fn map_flags(page_flags: PageFlags<RmmA>) -> MapFlags {
@@ -320,14 +321,12 @@ impl AddrSpaceWrapper {
                 return Err(Error::new(EACCES));
             }
 
-            let new_flags = enforce_wx(
-                grant
-                    .info
-                    .flags()
-                    // TODO: Require a capability in order to map executable memory?
-                    .execute(flags.contains(MapFlags::PROT_EXEC))
-                    .write(flags.contains(MapFlags::PROT_WRITE)),
-            );
+            let new_flags = grant
+                .info
+                .flags()
+                // TODO: Require a capability in order to map executable memory?
+                .execute(flags.contains(MapFlags::PROT_EXEC))
+                .write(flags.contains(MapFlags::PROT_WRITE));
 
             // TODO: Allow enabling/disabling read access on architectures which allow it. On
             // x86_64 with protection keys (although only enforced by userspace), and AArch64 (I
