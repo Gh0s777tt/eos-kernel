@@ -81,7 +81,14 @@ impl Spcr {
                                 PAGE_SIZE,
                             )
                         };
-                        let serial_port = uart_pl011::SerialPort::new(virt.data(), false);
+                        let mut serial_port = uart_pl011::SerialPort::new(virt.data(), false);
+                        // E-OS: the SPCR/ACPI path skipped init(), which sets the PL011
+                        // control register (RXE | TXE | UARTEN). Without RXE the receiver
+                        // is off, so serial *input* never arrives (only output worked) --
+                        // interactive serial login was impossible under an ACPI boot
+                        // (the device-tree path in dtb/serial.rs already calls init()).
+                        // enable_irq() below only sets the interrupt mask, not RXE.
+                        serial_port.init(false);
                         *COM1.lock() = SerialKind::Pl011(serial_port);
                         //TODO: enable IRQ on more platforms and interrupt types
                         if (spcr.interrupt_type & INTERRUPT_TYPE_GIC) == INTERRUPT_TYPE_GIC {
