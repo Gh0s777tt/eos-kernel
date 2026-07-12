@@ -223,11 +223,17 @@ pub fn cpu_info<W: Write>(w: &mut W) -> Result {
     if cpuinfo.aa64isar0.has_feat_crc() {
         write!(w, " crc")?;
     }
-    if cpuinfo.aa64isar0.has_feat_sha1() && cpuinfo.aa64isar0.has_feat_sha256() {
+    // std::arch naming: "sha2" == SHA256 (SHA1 is a separate optional bit).
+    if cpuinfo.aa64isar0.has_feat_sha256() {
         write!(w, " sha2")?;
     }
-    if cpuinfo.aa64isar0.has_feat_aes() && cpuinfo.aa64isar0.has_feat_pmull() {
+    // Print AES and PMULL independently — the AES field is cumulative, so the
+    // previous `aes && pmull` guard could never fire and hid AES entirely.
+    if cpuinfo.aa64isar0.has_feat_aes() {
         write!(w, " aes")?;
+    }
+    if cpuinfo.aa64isar0.has_feat_pmull() {
+        write!(w, " pmull")?;
     }
 
     // ID_AA64ISAR1_EL1

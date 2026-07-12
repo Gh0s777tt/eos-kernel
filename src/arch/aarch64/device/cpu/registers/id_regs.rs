@@ -82,19 +82,21 @@ impl AA64Isar0 {
         self.crc32() == 0b0001
     }
     pub fn has_feat_sha256(&self) -> bool {
-        self.sha2() == 0b0001
+        self.sha2() >= 0b0001
     }
     pub fn has_feat_sha512(&self) -> bool {
-        self.sha2() == 0b0010
+        self.sha2() >= 0b0010
     }
     pub fn has_feat_sha1(&self) -> bool {
         self.sha1() == 0b0001
     }
+    // ID_AA64ISAR0_EL1.AES is cumulative: 0b0001 = AES (AESE/AESD/AESMC/AESIMC),
+    // 0b0010 additionally = PMULL/PMULL2. So AES is present for any nonzero value.
     pub fn has_feat_aes(&self) -> bool {
-        self.aes() == 0b0001
+        self.aes() >= 0b0001
     }
     pub fn has_feat_pmull(&self) -> bool {
-        self.aes() == 0b0010
+        self.aes() >= 0b0010
     }
 }
 
