@@ -206,23 +206,35 @@ impl GicDistIf {
         }
     }
 
+    // GICD_ISENABLER and GICD_ICENABLER are WRITE-ONE-TO-SET and WRITE-ONE-TO-CLEAR
+    // registers: a written 1 acts on that IRQ, a written 0 does nothing at all. Reading
+    // either one returns the *current enable mask* for the 32 IRQs in that block.
+    //
+    // A read-modify-write is therefore always wrong here, and on ICENABLER it is
+    // destructive: read the enable mask, OR in the target bit, write it back, and every
+    // IRQ that was enabled in that block gets a 1 written to its clear bit -- disabling
+    // all of them. That is E-OS `R-F16`. Two PCI devices on different INTx lines land on
+    // adjacent SPIs (e.g. SPI 3 and SPI 4, both in block 1), so masking the second
+    // device's line also masked the boot disk's. Nothing ever re-enabled it, because its
+    // driver was not in an interrupt cycle, so the root filesystem read never completed
+    // and the boot stalled in initfs with no panic and no error.
+    //
+    // On ISENABLER the same shape was harmless -- re-setting already-set bits is a no-op
+    // -- which is why the bug only ever showed up as an unexplained hang.
+    //
+    // Write the single bit. No read, no merge.
+
     pub unsafe fn irq_enable(&mut self, irq: u32) {
         unsafe {
             let offset = GICD_ISENABLER + (4 * (irq / 32));
-            let shift = 1 << (irq % 32);
-            let mut val = self.read(offset);
-            val |= shift;
-            self.write(offset, val);
+            self.write(offset, 1 << (irq % 32));
         }
     }
 
     pub unsafe fn irq_disable(&mut self, irq: u32) {
         unsafe {
             let offset = GICD_ICENABLER + (4 * (irq / 32));
-            let shift = 1 << (irq % 32);
-            let mut val = self.read(offset);
-            val |= shift;
-            self.write(offset, val);
+            self.write(offset, 1 << (irq % 32));
         }
     }
 
