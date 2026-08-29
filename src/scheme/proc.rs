@@ -1560,9 +1560,33 @@ impl ContextHandle {
                 let verb = ProcSchemeVerb::try_from_raw(verb).ok_or(Error::new(EINVAL))?;
 
                 match verb {
-                    ProcSchemeVerb::Iopl => context::current()
-                        .write(token.token())
-                        .set_userspace_io_allowed(true),
+                    ProcSchemeVerb::Iopl => {
+                        // Gate raw port I/O on root. Without this check ANY process, at ANY uid,
+                        // could reach this verb: `open_via_dup` is opened without a privilege
+                        // flag (see the dup table above), `kdup` discards its CallerCtx, and
+                        // `kcall` is not given one at all -- so there was no privilege check
+                        // anywhere along the path.
+                        //
+                        // What it granted is not narrow. set_userspace_io_allowed points the
+                        // TSS at an all-zero I/O bitmap (arch::x86_shared::gdt, IOBITMAP_SIZE
+                        // = 65536/8), and a zero bit means "permitted", so the caller received
+                        // every one of the 65536 ports -- including 0xCF8/0xCFC, i.e. PCI
+                        // configuration space, from which BARs can be reprogrammed and
+                        // bus-mastering DMA set up against arbitrary physical memory.
+                        //
+                        // The read guard is scoped so it is released before the write lock is
+                        // taken, matching the existing idiom in scheme/user.rs::fchown.
+                        {
+                            let ctx = context::current();
+                            let cx = &ctx.read(token.token());
+                            if cx.euid != 0 {
+                                return Err(Error::new(EPERM));
+                            }
+                        }
+                        context::current()
+                            .write(token.token())
+                            .set_userspace_io_allowed(true)
+                    }
                     _ => return Err(Error::new(EINVAL)),
                 }
                 Ok(0)
