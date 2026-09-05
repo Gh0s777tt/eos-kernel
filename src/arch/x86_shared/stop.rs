@@ -85,7 +85,17 @@ fn userspace_acpi_shutdown(token: &mut CleanLockToken) {
         let _ = context::switch(token);
 
         let current = time::monotonic(token);
-        if current - initial > time::NANOS_PER_SEC {
+        // MEASURED (E-OS `R-F36`, 2026-09-05): plain `current - initial` panics with
+        // "attempt to subtract with overflow" in 2 of 5 guest shutdowns. `monotonic_absolute()`
+        // reads the accumulated OFFSET and the hardware counter non-atomically
+        // (arch/x86_shared/time.rs:12-13 -- `offset + hpet_or_pit()`, where `hpet_or_pit()`
+        // counts nanoseconds *since the last timer interrupt*), so a timer interrupt landing
+        // between the two reads yields the old offset together with the already-reset counter:
+        // the clock steps backwards by up to one tick. Upstream wraps silently; the E-OS release
+        // kernel sets `overflow-checks = true`, so the underflow aborts `kstop()` *before* the
+        // fallback shutdown methods below ever run. Saturating keeps the wait honest -- a
+        // backwards step counts as "no time has passed" and the loop waits out the real second.
+        if current.saturating_sub(initial) > time::NANOS_PER_SEC {
             info!("Timeout reached, thus falling back to other shutdown methods.");
             return;
         }
